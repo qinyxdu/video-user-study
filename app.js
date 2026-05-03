@@ -32,7 +32,6 @@
   const debugBanner = document.getElementById("debug-banner");
   const canSubmitToServer = submitEndpoint.length > 0;
   const pendingVideoLoads = new WeakSet();
-  const pendingVideoReady = new WeakMap();
   const rowControllers = new Set();
   const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
@@ -711,7 +710,6 @@
     const { videos, rowState } = controller;
     rowState.syncing = true;
     try {
-      await Promise.all(videos.map((video) => ensureVideoReady(video)));
       for (const video of videos) {
         ensureVideoLoaded(video);
         if (Number.isFinite(time) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
@@ -846,55 +844,6 @@
     video.src = source;
     video.load();
     pendingVideoLoads.delete(video);
-  }
-
-  function ensureVideoReady(video) {
-    if (!(video instanceof HTMLVideoElement)) {
-      return Promise.resolve();
-    }
-
-    ensureVideoLoaded(video);
-
-    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      return Promise.resolve();
-    }
-
-    const existing = pendingVideoReady.get(video);
-    if (existing) {
-      return existing;
-    }
-
-    const promise = new Promise((resolve) => {
-      let settled = false;
-      let timeoutId = null;
-
-      const cleanup = () => {
-        video.removeEventListener("loadeddata", handleReady);
-        video.removeEventListener("canplay", handleReady);
-        video.removeEventListener("error", handleReady);
-        if (timeoutId !== null) {
-          window.clearTimeout(timeoutId);
-        }
-        pendingVideoReady.delete(video);
-      };
-
-      const handleReady = () => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        cleanup();
-        resolve();
-      };
-
-      timeoutId = window.setTimeout(handleReady, 2500);
-      video.addEventListener("loadeddata", handleReady, { once: true });
-      video.addEventListener("canplay", handleReady, { once: true });
-      video.addEventListener("error", handleReady, { once: true });
-    });
-
-    pendingVideoReady.set(video, promise);
-    return promise;
   }
 
   function getReferenceVideo(videos) {
