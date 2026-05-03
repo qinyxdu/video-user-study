@@ -692,7 +692,7 @@
 
   async function startRowPlayback(controller, time = 0, triggerVideo = null) {
     pauseOtherRows(controller);
-    await playRowForGroup(controller.videos, controller.rowState, time, triggerVideo);
+    await playRowForGroup(controller, time, triggerVideo);
   }
 
   function pauseOtherRows(activeController) {
