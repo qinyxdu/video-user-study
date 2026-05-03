@@ -33,6 +33,7 @@
   const canSubmitToServer = submitEndpoint.length > 0;
   const pendingVideoLoads = new WeakSet();
   const pendingVideoReady = new WeakMap();
+  const rowControllers = new Set();
   const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
   if (!data || !Array.isArray(data.groups)) {
@@ -559,6 +560,7 @@
 
   function bindRowVideoSync(rowElement) {
     const videos = Array.from(rowElement.querySelectorAll("video"));
+    const shells = videos.map((video) => video.closest(".video-shell"));
     const playToggleButton = rowElement.querySelector(".row-play-toggle");
     const restartButton = rowElement.querySelector(".row-restart");
     const seekInput = rowElement.querySelector(".row-seek");
@@ -567,12 +569,14 @@
       syncing: false,
       scrubbing: false,
     };
+    const controller = { rowElement, videos, rowState };
+    rowControllers.add(controller);
 
     if (playToggleButton) {
       playToggleButton.addEventListener("click", async () => {
         const lead = getReferenceVideo(videos);
         if (videos.every((video) => video.paused)) {
-          await playRowForGroup(videos, rowState, lead.currentTime || 0);
+          await startRowPlayback(controller, lead.currentTime || 0);
         } else {
           pauseRowForGroup(videos, rowState);
         }
@@ -581,7 +585,7 @@
 
     if (restartButton) {
       restartButton.addEventListener("click", async () => {
-        await playRowForGroup(videos, rowState, 0);
+        await startRowPlayback(controller, 0);
       });
     }
 
@@ -606,15 +610,25 @@
       });
     }
 
-    videos.forEach((video) => {
-      video.addEventListener("click", async () => {
+    shells.forEach((shell, index) => {
+      if (!shell) {
+        return;
+      }
+      shell.addEventListener("click", async () => {
+        const video = videos[index];
+        if (!video) {
+          return;
+        }
         ensureVideoLoaded(video);
         if (videos.every((item) => item.paused)) {
-          await playRowForGroup(videos, rowState, video.currentTime || 0, video);
+          await startRowPlayback(controller, video.currentTime || 0, video);
         } else {
           pauseRowForGroup(videos, rowState);
         }
       });
+    });
+
+    videos.forEach((video) => {
 
       video.addEventListener("play", async () => {
         ensureVideoLoaded(video);
@@ -622,7 +636,7 @@
           updateVideoShellState(videos);
           return;
         }
-        await playRowForGroup(videos, rowState, video.currentTime || 0, video);
+        await startRowPlayback(controller, video.currentTime || 0, video);
       });
 
       video.addEventListener("pause", () => {
@@ -676,6 +690,22 @@
 
     updateRowProgress(videos, seekInput, timeLabel);
     updateVideoShellState(videos);
+  }
+
+  async function startRowPlayback(controller, time = 0, triggerVideo = null) {
+    pauseOtherRows(controller);
+    await playRowForGroup(controller.videos, controller.rowState, time, triggerVideo);
+  }
+
+  function pauseOtherRows(activeController) {
+    rowControllers.forEach((controller) => {
+      if (controller === activeController) {
+        return;
+      }
+      if (controller.videos.some((video) => !video.paused)) {
+        pauseRowForGroup(controller.videos, controller.rowState);
+      }
+    });
   }
 
   async function playRowForGroup(videos, rowState, time = 0, triggerVideo = null) {
