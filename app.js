@@ -47,6 +47,9 @@
   state.answers = state.answers || {};
   state.rowOrders = state.rowOrders || {};
   state.startedAt = state.startedAt || new Date().toISOString();
+  state.pendingSubmissionId = state.pendingSubmissionId || "";
+  state.pendingSubmittedAt = state.pendingSubmittedAt || "";
+  state.pendingSubmissionFingerprint = state.pendingSubmissionFingerprint || "";
 
   participantIdInput.value = state.participantId;
   notesInput.value = state.notes;
@@ -314,6 +317,10 @@
     if (!canSubmitToServer) {
       submitButton.disabled = true;
       submitStatus.textContent = "当前未配置在线提交地址，请先在 config.js 中填入 Google Apps Script Web App URL。";
+    } else if (state.pendingSubmissionId && state.pendingSubmittedAt) {
+      submitStatus.textContent = `检测到上次未完成提交，可再次点击“提交结果”继续写入 Google Sheets（开始于 ${formatDateTime(
+        state.pendingSubmittedAt
+      )}）。`;
     } else if (state.lastSubmittedAt) {
       submitStatus.textContent = `上次自动提交时间 ${formatDateTime(state.lastSubmittedAt)}。`;
     } else {
@@ -452,24 +459,146 @@
     submitStatus.textContent = "正在提交结果…";
 
     try {
-      const formData = new FormData();
-      formData.append("payload", JSON.stringify(buildExportPayload()));
+      const payload = buildExportPayload();
+      const submissionMeta = getSubmissionMeta(payload);
 
-      await fetch(submitEndpoint, {
-        method: "POST",
-        mode: "no-cors",
-        body: formData,
-      });
-      state.lastSubmittedAt = new Date().toISOString();
-      state.lastSubmissionId = session.responseId;
+      await submitBatches(payload, submissionMeta);
+
+      state.lastSubmittedAt = submissionMeta.submittedAt;
+      state.lastSubmissionId = submissionMeta.submissionId;
+      state.pendingSubmissionId = "";
+      state.pendingSubmittedAt = "";
+      state.pendingSubmissionFingerprint = "";
       saveState();
-      submitStatus.textContent = `提交请求已发送，时间 ${formatDateTime(state.lastSubmittedAt)}。如网络正常，结果会写入 Google Sheets。`;
+      submitStatus.textContent = `已确认写入 Google Sheets：${payload.prompt_rows.length} 条题目行、${payload.detailed_choices.length} 条维度行。提交时间 ${formatDateTime(
+        state.lastSubmittedAt
+      )}。`;
     } catch (error) {
       console.error(error);
-      submitStatus.textContent = "自动提交失败，请稍后重试，或先导出 JSON 备份。";
+      submitStatus.textContent = `自动提交失败：${getErrorMessage(error)}。可以再次点击“提交结果”继续重试，或先导出 JSON 备份。`;
     } finally {
       submitButton.disabled = false;
     }
+  }
+
+  async function submitBatches(payload, submissionMeta) {
+    const promptChunks = chunkArray(payload.prompt_rows, 1);
+    const detailChunks = chunkArray(payload.detailed_choices, 2);
+    const totalChunks = promptChunks.length + detailChunks.length;
+    let completedChunks = 0;
+
+    for (let index = 0; index < promptChunks.length; index += 1) {
+      completedChunks += 1;
+      submitStatus.textContent = `正在写入 Google Sheets…（${completedChunks}/${totalChunks}）`;
+      await sendBatchRequest("prompt_rows", promptChunks[index], index + 1, promptChunks.length, payload, submissionMeta);
+    }
+
+    for (let index = 0; index < detailChunks.length; index += 1) {
+      completedChunks += 1;
+      submitStatus.textContent = `正在写入 Google Sheets…（${completedChunks}/${totalChunks}）`;
+      await sendBatchRequest(
+        "detailed_choices",
+        detailChunks[index],
+        index + 1,
+        detailChunks.length,
+        payload,
+        submissionMeta
+      );
+    }
+  }
+
+  async function sendBatchRequest(type, rows, chunkIndex, chunkTotal, payload, submissionMeta) {
+    const params = new URLSearchParams();
+    params.set("action", "submit_batch");
+    params.set("type", type);
+    params.set("submitted_at", submissionMeta.submittedAt);
+    params.set("participant_id", payload.participantId || "");
+    params.set("response_id", payload.responseId || "");
+    params.set("notes", payload.notes || "");
+    params.set("submission_id", submissionMeta.submissionId);
+    params.set("chunk_index", String(chunkIndex));
+    params.set("chunk_total", String(chunkTotal));
+    params.set("rows", JSON.stringify(rows));
+    params.set("_ts", String(Date.now()));
+
+    const response = await fetch(`${submitEndpoint}?${params.toString()}`, {
+      method: "GET",
+      mode: "cors",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error(`网络响应异常（${response.status}）`);
+    }
+
+    const result = await response.json();
+    if (!result || !result.ok) {
+      throw new Error(result && result.error ? result.error : "Google Sheets 未确认写入成功");
+    }
+    if (result.type !== type || typeof result.rows_received !== "number") {
+      throw new Error("Google Apps Script 还是旧版本，请先更新并重新部署 Code.gs");
+    }
+  }
+
+  function getSubmissionMeta(payload) {
+    const fingerprint = getSubmissionFingerprint(payload);
+    if (
+      state.pendingSubmissionId &&
+      state.pendingSubmittedAt &&
+      state.pendingSubmissionFingerprint &&
+      state.pendingSubmissionFingerprint === fingerprint
+    ) {
+      return {
+        submissionId: state.pendingSubmissionId,
+        submittedAt: state.pendingSubmittedAt,
+      };
+    }
+
+    const submissionMeta = {
+      submissionId: `${session.responseId}_${Date.now()}`,
+      submittedAt: new Date().toISOString(),
+    };
+    state.pendingSubmissionId = submissionMeta.submissionId;
+    state.pendingSubmittedAt = submissionMeta.submittedAt;
+    state.pendingSubmissionFingerprint = fingerprint;
+    saveState();
+    return submissionMeta;
+  }
+
+  function getSubmissionFingerprint(payload) {
+    const text = JSON.stringify({
+      participantId: payload.participantId || "",
+      notes: payload.notes || "",
+      prompt_rows: payload.prompt_rows,
+      detailed_choices: payload.detailed_choices,
+    });
+    return hashString(text);
+  }
+
+  function hashString(input) {
+    let hash = 5381;
+    for (let index = 0; index < input.length; index += 1) {
+      hash = (hash * 33) ^ input.charCodeAt(index);
+    }
+    return `h${(hash >>> 0).toString(16)}`;
+  }
+
+  function chunkArray(items, chunkSize) {
+    const chunks = [];
+    for (let index = 0; index < items.length; index += chunkSize) {
+      chunks.push(items.slice(index, index + chunkSize));
+    }
+    return chunks;
+  }
+
+  function getErrorMessage(error) {
+    if (!error) {
+      return "未知错误";
+    }
+    if (typeof error === "string") {
+      return error;
+    }
+    return error.message || String(error);
   }
 
   function buildCsv() {
