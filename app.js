@@ -32,6 +32,7 @@
   const debugBanner = document.getElementById("debug-banner");
   const canSubmitToServer = submitEndpoint.length > 0;
   const pendingVideoLoads = new WeakSet();
+  const pendingVideoReady = new WeakMap();
   const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
   if (!data || !Array.isArray(data.groups)) {
@@ -146,11 +147,12 @@
           video.loop = true;
           video.muted = true;
           video.playsInline = true;
-          video.preload = "none";
+          video.preload = "metadata";
           video.dataset.src = encodeURI(method.video_path);
           video.dataset.rowId = row.row_id;
           video.dataset.methodId = method.method_id;
           video.dataset.position = position.key;
+          ensureVideoLoaded(video);
           shell.appendChild(video);
 
           const overlay = document.createElement("div");
@@ -566,12 +568,9 @@
       scrubbing: false,
     };
 
-    videos.forEach(observeVideoLoad);
-
     if (playToggleButton) {
       playToggleButton.addEventListener("click", async () => {
-        const lead = videos[0];
-        ensureVideoLoaded(lead);
+        const lead = getReferenceVideo(videos);
         if (videos.every((video) => video.paused)) {
           await playRowForGroup(videos, rowState, lead.currentTime || 0);
         } else {
@@ -588,7 +587,7 @@
 
     if (seekInput) {
       seekInput.addEventListener("input", () => {
-        const lead = videos[0];
+        const lead = getReferenceVideo(videos);
         const duration = lead.duration || 0;
         if (!duration) {
           return;
@@ -682,9 +681,10 @@
   async function playRowForGroup(videos, rowState, time = 0, triggerVideo = null) {
     rowState.syncing = true;
     try {
+      await Promise.all(videos.map((video) => ensureVideoReady(video)));
       for (const video of videos) {
         ensureVideoLoaded(video);
-        if (Number.isFinite(time)) {
+        if (Number.isFinite(time) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
           video.currentTime = time;
         }
         if (triggerVideo && video !== triggerVideo) {
@@ -721,7 +721,7 @@
   }
 
   function updateRowProgress(videos, seekInput, timeLabel) {
-    const lead = videos[0];
+    const lead = getReferenceVideo(videos);
     if (!lead) {
       return;
     }
@@ -758,32 +758,6 @@
     return (Math.imul(seed, 1664525) + 1013904223) >>> 0;
   }
 
-  function observeVideoLoad(video) {
-    if (!("IntersectionObserver" in window)) {
-      ensureVideoLoaded(video);
-      return;
-    }
-
-    if (!window.__studyVideoObserver) {
-      window.__studyVideoObserver = new IntersectionObserver(
-        (entries) => {
-          entries.forEach((entry) => {
-            if (entry.isIntersecting) {
-              ensureVideoLoaded(entry.target);
-              window.__studyVideoObserver.unobserve(entry.target);
-            }
-          });
-        },
-        {
-          rootMargin: "300px 0px",
-          threshold: 0.01,
-        },
-      );
-    }
-
-    window.__studyVideoObserver.observe(video);
-  }
-
   function ensureVideoLoaded(video) {
     if (!(video instanceof HTMLVideoElement)) {
       return;
@@ -799,6 +773,63 @@
     video.src = source;
     video.load();
     pendingVideoLoads.delete(video);
+  }
+
+  function ensureVideoReady(video) {
+    if (!(video instanceof HTMLVideoElement)) {
+      return Promise.resolve();
+    }
+
+    ensureVideoLoaded(video);
+
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return Promise.resolve();
+    }
+
+    const existing = pendingVideoReady.get(video);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = new Promise((resolve) => {
+      let settled = false;
+      let timeoutId = null;
+
+      const cleanup = () => {
+        video.removeEventListener("loadeddata", handleReady);
+        video.removeEventListener("canplay", handleReady);
+        video.removeEventListener("error", handleReady);
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId);
+        }
+        pendingVideoReady.delete(video);
+      };
+
+      const handleReady = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      timeoutId = window.setTimeout(handleReady, 2500);
+      video.addEventListener("loadeddata", handleReady, { once: true });
+      video.addEventListener("canplay", handleReady, { once: true });
+      video.addEventListener("error", handleReady, { once: true });
+    });
+
+    pendingVideoReady.set(video, promise);
+    return promise;
+  }
+
+  function getReferenceVideo(videos) {
+    return (
+      videos.find((video) => !video.paused && video.readyState >= HTMLMediaElement.HAVE_METADATA) ||
+      videos.find((video) => video.readyState >= HTMLMediaElement.HAVE_METADATA) ||
+      videos[0]
+    );
   }
 
   function stableHash(text) {
