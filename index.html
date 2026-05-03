@@ -26,24 +26,6 @@
             <span>备注（可选）</span>
             <textarea id="participant-notes" rows="3" placeholder="记录额外观察"></textarea>
           </label>
-          <div class="progress-panel">
-            <div class="progress-line">
-              <span>完成进度</span>
-              <strong id="progress-text">0 / 0</strong>
-            </div>
-            <div class="progress-bar">
-              <div id="progress-fill"></div>
-            </div>
-            <p id="progress-hint">正在加载问卷…</p>
-            <p id="submit-status" class="submit-status">当前为本地填写模式。</p>
-          </div>
-          <div class="action-row">
-            <button id="submit-button" type="button">提交结果</button>
-            <button id="save-button" type="button">保存进度</button>
-            <button id="export-csv-button" type="button">导出 CSV</button>
-            <button id="export-json-button" type="button">导出 JSON</button>
-            <button id="reset-button" class="ghost" type="button">重置</button>
-          </div>
         </div>
       </header>
 
@@ -60,14 +42,27 @@
           </div>
         </section>
 
-        <section id="debug-banner" class="legend-card debug-card" hidden>
-          <div>
-            <h2>Debug Mode</h2>
-            <p>当前显示真实方法名，仅用于你自己检查左右位置映射。外部被试不要使用这个模式。</p>
+        <div id="study-root" class="study-root"></div>
+
+        <section class="meta-panel study-footer">
+          <div class="progress-panel">
+            <div class="progress-line">
+              <span>完成进度</span>
+              <strong id="progress-text">0 / 0</strong>
+            </div>
+            <div class="progress-bar">
+              <div id="progress-fill"></div>
+            </div>
+            <p id="progress-hint">正在加载问卷…</p>
+            <p id="submit-status" class="submit-status">当前为本地填写模式。</p>
+          </div>
+          <div class="action-row">
+            <button id="save-button" type="button">保存进度</button>
+            <button id="export-csv-button" type="button">导出 CSV</button>
+            <button id="export-json-button" type="button">导出 JSON</button>
+            <button id="reset-button" class="ghost" type="button">重置</button>
           </div>
         </section>
-
-        <div id="study-root" class="study-root"></div>
       </main>
     </div>
 

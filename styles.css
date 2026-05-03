@@ -202,7 +202,7 @@ button.ghost {
   border: 1px solid rgba(180, 35, 24, 0.18);
 }
 
-#submit-button {
+#export-csv-button {
   background: linear-gradient(135deg, var(--accent-2), #ea580c);
 }
 
@@ -262,6 +262,10 @@ main {
   margin-top: 24px;
   display: grid;
   gap: 24px;
+}
+
+.study-footer {
+  margin-top: 28px;
 }
 
 .group-section {

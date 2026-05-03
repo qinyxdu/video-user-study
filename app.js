@@ -13,8 +13,6 @@
 
   const STORAGE_KEY = "video-study-state-v1";
   const SESSION_KEY = "video-study-session-v1";
-  const config = window.STUDY_CONFIG || {};
-  const submitEndpoint = String(config.submitEndpoint || "").trim();
 
   const data = window.STUDY_DATA;
   const root = document.getElementById("study-root");
@@ -29,8 +27,6 @@
   const exportCsvButton = document.getElementById("export-csv-button");
   const exportJsonButton = document.getElementById("export-json-button");
   const resetButton = document.getElementById("reset-button");
-  const debugBanner = document.getElementById("debug-banner");
-  const canSubmitToServer = submitEndpoint.length > 0;
   const pendingVideoLoads = new WeakSet();
   const rowControllers = new Set();
   const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
@@ -47,13 +43,11 @@
   state.answers = state.answers || {};
   state.rowOrders = state.rowOrders || {};
   state.startedAt = state.startedAt || new Date().toISOString();
-  state.pendingSubmissionId = state.pendingSubmissionId || "";
-  state.pendingSubmittedAt = state.pendingSubmittedAt || "";
-  state.pendingSubmissionFingerprint = state.pendingSubmissionFingerprint || "";
+  state.lastExportedAt = state.lastExportedAt || "";
+  state.lastExportedFilename = state.lastExportedFilename || "";
 
   participantIdInput.value = state.participantId;
   notesInput.value = state.notes;
-  debugBanner.hidden = !isDebugMode;
 
   renderStudy();
   bindGlobalEvents();
@@ -271,18 +265,11 @@
       progressHint.textContent = `进度已保存，更新时间 ${formatDateTime(state.updatedAt)}。`;
     });
 
-    submitButton.addEventListener("click", async () => {
-      const incompleteCount = getIncompleteRowIds().length;
-      if (incompleteCount > 0) {
-        const proceed = window.confirm(`还有 ${incompleteCount} 行未完成，仍然提交吗？`);
-        if (!proceed) {
-          return;
-        }
-      }
-      await submitResponse();
-    });
-
     exportCsvButton.addEventListener("click", () => {
+      const filenameBase = requireParticipantFileBase("导出 CSV");
+      if (!filenameBase) {
+        return;
+      }
       const incompleteCount = getIncompleteRowIds().length;
       if (incompleteCount > 0) {
         const proceed = window.confirm(`还有 ${incompleteCount} 行未完成，仍然导出 CSV 吗？`);
@@ -290,10 +277,16 @@
           return;
         }
       }
-      downloadFile(buildCsv(), "video-study-results.csv", "text/csv;charset=utf-8;");
+      const filename = `${filenameBase}.csv`;
+      downloadFile(buildCsv(), filename, "text/csv;charset=utf-8;");
+      markExported(filename);
     });
 
     exportJsonButton.addEventListener("click", () => {
+      const filenameBase = requireParticipantFileBase("导出 JSON");
+      if (!filenameBase) {
+        return;
+      }
       const incompleteCount = getIncompleteRowIds().length;
       if (incompleteCount > 0) {
         const proceed = window.confirm(`还有 ${incompleteCount} 行未完成，仍然导出 JSON 吗？`);
@@ -301,7 +294,9 @@
           return;
         }
       }
-      downloadFile(JSON.stringify(buildExportPayload(), null, 2), "video-study-results.json", "application/json");
+      const filename = `${filenameBase}.json`;
+      downloadFile(JSON.stringify(buildExportPayload(), null, 2), filename, "application/json");
+      markExported(filename);
     });
 
     resetButton.addEventListener("click", () => {
@@ -314,17 +309,10 @@
       window.location.reload();
     });
 
-    if (!canSubmitToServer) {
-      submitButton.disabled = true;
-      submitStatus.textContent = "当前未配置在线提交地址，请先在 config.js 中填入 Google Apps Script Web App URL。";
-    } else if (state.pendingSubmissionId && state.pendingSubmittedAt) {
-      submitStatus.textContent = `检测到上次未完成提交，可再次点击“提交结果”继续写入 Google Sheets（开始于 ${formatDateTime(
-        state.pendingSubmittedAt
-      )}）。`;
-    } else if (state.lastSubmittedAt) {
-      submitStatus.textContent = `上次自动提交时间 ${formatDateTime(state.lastSubmittedAt)}。`;
+    if (state.lastExportedAt && state.lastExportedFilename) {
+      submitStatus.textContent = `上次导出文件 ${state.lastExportedFilename}，时间 ${formatDateTime(state.lastExportedAt)}。`;
     } else {
-      submitStatus.textContent = "当前可自动提交到 Google Sheets。";
+      submitStatus.textContent = "完成后请导出 CSV 并发送给研究者；如需完整备份，可额外导出 JSON。";
     }
   }
 
@@ -447,158 +435,6 @@
       detailed_choices: detailedChoices,
       summary,
     };
-  }
-
-  async function submitResponse() {
-    if (!canSubmitToServer) {
-      submitStatus.textContent = "当前未配置在线提交地址。";
-      return;
-    }
-
-    submitButton.disabled = true;
-    submitStatus.textContent = "正在提交结果…";
-
-    try {
-      const payload = buildExportPayload();
-      const submissionMeta = getSubmissionMeta(payload);
-
-      await submitBatches(payload, submissionMeta);
-
-      state.lastSubmittedAt = submissionMeta.submittedAt;
-      state.lastSubmissionId = submissionMeta.submissionId;
-      state.pendingSubmissionId = "";
-      state.pendingSubmittedAt = "";
-      state.pendingSubmissionFingerprint = "";
-      saveState();
-      submitStatus.textContent = `已确认写入 Google Sheets：${payload.prompt_rows.length} 条题目行、${payload.detailed_choices.length} 条维度行。提交时间 ${formatDateTime(
-        state.lastSubmittedAt
-      )}。`;
-    } catch (error) {
-      console.error(error);
-      submitStatus.textContent = `自动提交失败：${getErrorMessage(error)}。可以再次点击“提交结果”继续重试，或先导出 JSON 备份。`;
-    } finally {
-      submitButton.disabled = false;
-    }
-  }
-
-  async function submitBatches(payload, submissionMeta) {
-    const promptChunks = chunkArray(payload.prompt_rows, 1);
-    const detailChunks = chunkArray(payload.detailed_choices, 2);
-    const totalChunks = promptChunks.length + detailChunks.length;
-    let completedChunks = 0;
-
-    for (let index = 0; index < promptChunks.length; index += 1) {
-      completedChunks += 1;
-      submitStatus.textContent = `正在写入 Google Sheets…（${completedChunks}/${totalChunks}）`;
-      await sendBatchRequest("prompt_rows", promptChunks[index], index + 1, promptChunks.length, payload, submissionMeta);
-    }
-
-    for (let index = 0; index < detailChunks.length; index += 1) {
-      completedChunks += 1;
-      submitStatus.textContent = `正在写入 Google Sheets…（${completedChunks}/${totalChunks}）`;
-      await sendBatchRequest(
-        "detailed_choices",
-        detailChunks[index],
-        index + 1,
-        detailChunks.length,
-        payload,
-        submissionMeta
-      );
-    }
-  }
-
-  async function sendBatchRequest(type, rows, chunkIndex, chunkTotal, payload, submissionMeta) {
-    const params = new URLSearchParams();
-    params.set("action", "submit_batch");
-    params.set("type", type);
-    params.set("submitted_at", submissionMeta.submittedAt);
-    params.set("participant_id", payload.participantId || "");
-    params.set("response_id", payload.responseId || "");
-    params.set("notes", payload.notes || "");
-    params.set("submission_id", submissionMeta.submissionId);
-    params.set("chunk_index", String(chunkIndex));
-    params.set("chunk_total", String(chunkTotal));
-    params.set("rows", JSON.stringify(rows));
-    params.set("_ts", String(Date.now()));
-
-    const response = await fetch(`${submitEndpoint}?${params.toString()}`, {
-      method: "GET",
-      mode: "cors",
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      throw new Error(`网络响应异常（${response.status}）`);
-    }
-
-    const result = await response.json();
-    if (!result || !result.ok) {
-      throw new Error(result && result.error ? result.error : "Google Sheets 未确认写入成功");
-    }
-    if (result.type !== type || typeof result.rows_received !== "number") {
-      throw new Error("Google Apps Script 还是旧版本，请先更新并重新部署 Code.gs");
-    }
-  }
-
-  function getSubmissionMeta(payload) {
-    const fingerprint = getSubmissionFingerprint(payload);
-    if (
-      state.pendingSubmissionId &&
-      state.pendingSubmittedAt &&
-      state.pendingSubmissionFingerprint &&
-      state.pendingSubmissionFingerprint === fingerprint
-    ) {
-      return {
-        submissionId: state.pendingSubmissionId,
-        submittedAt: state.pendingSubmittedAt,
-      };
-    }
-
-    const submissionMeta = {
-      submissionId: `${session.responseId}_${Date.now()}`,
-      submittedAt: new Date().toISOString(),
-    };
-    state.pendingSubmissionId = submissionMeta.submissionId;
-    state.pendingSubmittedAt = submissionMeta.submittedAt;
-    state.pendingSubmissionFingerprint = fingerprint;
-    saveState();
-    return submissionMeta;
-  }
-
-  function getSubmissionFingerprint(payload) {
-    const text = JSON.stringify({
-      participantId: payload.participantId || "",
-      notes: payload.notes || "",
-      prompt_rows: payload.prompt_rows,
-      detailed_choices: payload.detailed_choices,
-    });
-    return hashString(text);
-  }
-
-  function hashString(input) {
-    let hash = 5381;
-    for (let index = 0; index < input.length; index += 1) {
-      hash = (hash * 33) ^ input.charCodeAt(index);
-    }
-    return `h${(hash >>> 0).toString(16)}`;
-  }
-
-  function chunkArray(items, chunkSize) {
-    const chunks = [];
-    for (let index = 0; index < items.length; index += chunkSize) {
-      chunks.push(items.slice(index, index + chunkSize));
-    }
-    return chunks;
-  }
-
-  function getErrorMessage(error) {
-    if (!error) {
-      return "未知错误";
-    }
-    if (typeof error === "string") {
-      return error;
-    }
-    return error.message || String(error);
   }
 
   function buildCsv() {
@@ -1077,6 +913,33 @@
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  }
+
+  function requireParticipantFileBase(actionLabel) {
+    const participantId = String(participantIdInput.value || "").trim();
+    if (!participantId) {
+      window.alert(`请先填写参与者编号，再${actionLabel}。`);
+      participantIdInput.focus();
+      return "";
+    }
+    state.participantId = participantId;
+    saveState();
+    return sanitizeFilename(participantId);
+  }
+
+  function sanitizeFilename(value) {
+    const normalized = String(value)
+      .trim()
+      .replace(/\s+/g, "_")
+      .replace(/[\\/:*?"<>|]+/g, "-");
+    return normalized || "participant";
+  }
+
+  function markExported(filename) {
+    state.lastExportedAt = new Date().toISOString();
+    state.lastExportedFilename = filename;
+    saveState();
+    submitStatus.textContent = `已导出 ${filename}，时间 ${formatDateTime(state.lastExportedAt)}。`;
   }
 
   function formatDateTime(value) {
