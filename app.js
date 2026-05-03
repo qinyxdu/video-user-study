@@ -568,8 +568,9 @@
     const rowState = {
       syncing: false,
       scrubbing: false,
+      rafId: 0,
     };
-    const controller = { rowElement, videos, rowState };
+    const controller = { rowElement, videos, rowState, playToggleButton, restartButton, seekInput, timeLabel };
     rowControllers.add(controller);
 
     if (playToggleButton) {
@@ -578,7 +579,7 @@
         if (videos.every((video) => video.paused)) {
           await startRowPlayback(controller, lead.currentTime || 0);
         } else {
-          pauseRowForGroup(videos, rowState);
+          pauseRowForGroup(controller);
         }
       });
     }
@@ -623,7 +624,7 @@
         if (videos.every((item) => item.paused)) {
           await startRowPlayback(controller, video.currentTime || 0, video);
         } else {
-          pauseRowForGroup(videos, rowState);
+          pauseRowForGroup(controller);
         }
       });
     });
@@ -633,7 +634,7 @@
       video.addEventListener("play", async () => {
         ensureVideoLoaded(video);
         if (rowState.syncing) {
-          updateVideoShellState(videos);
+          updateControllerUi(controller);
           return;
         }
         await startRowPlayback(controller, video.currentTime || 0, video);
@@ -641,10 +642,10 @@
 
       video.addEventListener("pause", () => {
         if (rowState.syncing || video.ended) {
-          updateVideoShellState(videos);
+          updateControllerUi(controller);
           return;
         }
-        pauseRowForGroup(videos, rowState, video.currentTime || 0);
+        pauseRowForGroup(controller, video.currentTime || 0);
       });
 
       video.addEventListener("seeking", () => {
@@ -658,7 +659,7 @@
           }
         });
         rowState.syncing = false;
-        updateRowProgress(videos, seekInput, timeLabel);
+        updateControllerUi(controller);
       });
 
       video.addEventListener("ratechange", () => {
@@ -675,21 +676,19 @@
       });
 
       video.addEventListener("timeupdate", () => {
-        updateRowProgress(videos, seekInput, timeLabel);
-        updateVideoShellState(videos);
+        updateControllerUi(controller);
       });
 
       video.addEventListener("loadedmetadata", () => {
-        updateRowProgress(videos, seekInput, timeLabel);
+        updateControllerUi(controller);
       });
 
       video.addEventListener("ended", () => {
-        updateVideoShellState(videos);
+        updateControllerUi(controller);
       });
     });
 
-    updateRowProgress(videos, seekInput, timeLabel);
-    updateVideoShellState(videos);
+    updateControllerUi(controller);
   }
 
   async function startRowPlayback(controller, time = 0, triggerVideo = null) {
@@ -703,12 +702,13 @@
         return;
       }
       if (controller.videos.some((video) => !video.paused)) {
-        pauseRowForGroup(controller.videos, controller.rowState);
+        pauseRowForGroup(controller);
       }
     });
   }
 
-  async function playRowForGroup(videos, rowState, time = 0, triggerVideo = null) {
+  async function playRowForGroup(controller, time = 0, triggerVideo = null) {
+    const { videos, rowState } = controller;
     rowState.syncing = true;
     try {
       await Promise.all(videos.map((video) => ensureVideoReady(video)));
@@ -724,11 +724,13 @@
       await Promise.allSettled(videos.map((video) => video.play()));
     } finally {
       rowState.syncing = false;
-      updateVideoShellState(videos);
+      updateControllerUi(controller);
+      startProgressLoop(controller);
     }
   }
 
-  function pauseRowForGroup(videos, rowState, time = null) {
+  function pauseRowForGroup(controller, time = null) {
+    const { videos, rowState } = controller;
     rowState.syncing = true;
     videos.forEach((video) => {
       if (time !== null) {
@@ -737,7 +739,48 @@
       video.pause();
     });
     rowState.syncing = false;
-    updateVideoShellState(videos);
+    stopProgressLoop(controller);
+    updateControllerUi(controller);
+  }
+
+  function startProgressLoop(controller) {
+    stopProgressLoop(controller);
+
+    const tick = () => {
+      updateControllerUi(controller);
+      if (controller.videos.some((video) => !video.paused && !video.ended)) {
+        controller.rowState.rafId = window.requestAnimationFrame(tick);
+      } else {
+        controller.rowState.rafId = 0;
+      }
+    };
+
+    controller.rowState.rafId = window.requestAnimationFrame(tick);
+  }
+
+  function stopProgressLoop(controller) {
+    if (controller.rowState.rafId) {
+      window.cancelAnimationFrame(controller.rowState.rafId);
+      controller.rowState.rafId = 0;
+    }
+  }
+
+  function updateControllerUi(controller) {
+    updateRowProgress(controller.videos, controller.seekInput, controller.timeLabel);
+    updateVideoShellState(controller.videos);
+    updateRowButtons(controller);
+  }
+
+  function updateRowButtons(controller) {
+    const isPlaying = controller.videos.some((video) => !video.paused && !video.ended);
+    if (controller.playToggleButton) {
+      controller.playToggleButton.textContent = isPlaying ? "暂停本行" : "播放本行";
+    }
+    if (controller.restartButton) {
+      controller.restartButton.disabled = controller.videos.every(
+        (video) => (video.currentTime || 0) <= 0 && (video.paused || video.ended),
+      );
+    }
   }
 
   function updateVideoShellState(videos) {
