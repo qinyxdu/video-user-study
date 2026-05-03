@@ -144,7 +144,7 @@
           shell.className = "video-shell";
 
           const video = document.createElement("video");
-          video.loop = true;
+          video.loop = false;
           video.muted = true;
           video.playsInline = true;
           video.preload = "metadata";
@@ -565,48 +565,54 @@
     const seekInput = rowElement.querySelector(".row-seek");
     const timeLabel = rowElement.querySelector(".row-time");
     const rowState = {
-      syncing: false,
-      scrubbing: false,
       rafId: 0,
+      scrubbing: false,
+      pendingTime: 0,
     };
-    const controller = { rowElement, videos, rowState, playToggleButton, restartButton, seekInput, timeLabel };
+    const controller = {
+      rowElement,
+      videos,
+      shells,
+      playToggleButton,
+      restartButton,
+      seekInput,
+      timeLabel,
+      rowState,
+    };
     rowControllers.add(controller);
 
-    if (playToggleButton) {
-      playToggleButton.addEventListener("click", async () => {
-        const lead = getReferenceVideo(videos);
-        if (videos.every((video) => video.paused)) {
-          await startRowPlayback(controller, lead.currentTime || 0);
-        } else {
-          pauseRowForGroup(controller);
-        }
-      });
-    }
+    playToggleButton?.addEventListener("click", () => {
+      if (isRowPlaying(controller)) {
+        pauseRow(controller);
+      } else {
+        void startRowPlayback(controller, getResumeTime(controller));
+      }
+    });
 
-    if (restartButton) {
-      restartButton.addEventListener("click", async () => {
-        await startRowPlayback(controller, 0);
-      });
-    }
+    restartButton?.addEventListener("click", () => {
+      void restartRow(controller);
+    });
 
     if (seekInput) {
       seekInput.addEventListener("input", () => {
-        const lead = getReferenceVideo(videos);
-        const duration = lead.duration || 0;
+        const duration = getRowDuration(controller);
         if (!duration) {
           return;
         }
         rowState.scrubbing = true;
+        stopProgressLoop(controller);
         const nextTime = (Number(seekInput.value) / 1000) * duration;
-        videos.forEach((video) => {
-          ensureVideoLoaded(video);
-          video.currentTime = nextTime;
-        });
-        updateRowProgress(videos, seekInput, timeLabel);
+        syncRowTime(controller, nextTime);
+        updateControllerUi(controller);
       });
 
       seekInput.addEventListener("change", () => {
         rowState.scrubbing = false;
+        if (isRowPlaying(controller)) {
+          startProgressLoop(controller);
+        } else {
+          updateControllerUi(controller);
+        }
       });
     }
 
@@ -614,75 +620,41 @@
       if (!shell) {
         return;
       }
-      shell.addEventListener("click", async () => {
-        const video = videos[index];
-        if (!video) {
+      shell.addEventListener("click", () => {
+        const clickedVideo = videos[index];
+        if (!clickedVideo) {
           return;
         }
-        ensureVideoLoaded(video);
-        if (videos.every((item) => item.paused)) {
-          await startRowPlayback(controller, video.currentTime || 0, video);
-        } else {
-          pauseRowForGroup(controller);
+        ensureVideoLoaded(clickedVideo);
+        if (isRowPlaying(controller)) {
+          pauseRow(controller);
+          return;
         }
+        void startRowPlayback(controller, getResumeTime(controller, clickedVideo.currentTime || 0), clickedVideo);
       });
     });
 
     videos.forEach((video) => {
-
-      video.addEventListener("play", async () => {
-        ensureVideoLoaded(video);
-        if (rowState.syncing) {
-          updateControllerUi(controller);
-          return;
-        }
-        await startRowPlayback(controller, video.currentTime || 0, video);
-      });
-
-      video.addEventListener("pause", () => {
-        if (rowState.syncing || video.ended) {
-          updateControllerUi(controller);
-          return;
-        }
-        pauseRowForGroup(controller, video.currentTime || 0);
-      });
-
-      video.addEventListener("seeking", () => {
-        if (rowState.syncing || rowState.scrubbing) {
-          return;
-        }
-        rowState.syncing = true;
-        videos.forEach((other) => {
-          if (other !== video) {
-            other.currentTime = video.currentTime;
-          }
-        });
-        rowState.syncing = false;
+      video.addEventListener("loadedmetadata", () => {
+        applyPendingTime(controller, video);
         updateControllerUi(controller);
-      });
-
-      video.addEventListener("ratechange", () => {
-        if (rowState.syncing) {
-          return;
-        }
-        rowState.syncing = true;
-        videos.forEach((other) => {
-          if (other !== video) {
-            other.playbackRate = video.playbackRate;
-          }
-        });
-        rowState.syncing = false;
       });
 
       video.addEventListener("timeupdate", () => {
-        updateControllerUi(controller);
-      });
-
-      video.addEventListener("loadedmetadata", () => {
-        updateControllerUi(controller);
+        if (!rowState.scrubbing) {
+          updateControllerUi(controller);
+        }
       });
 
       video.addEventListener("ended", () => {
+        if (video === getLeadVideo(controller)) {
+          finishRowPlayback(controller);
+        } else {
+          updateControllerUi(controller);
+        }
+      });
+
+      video.addEventListener("error", () => {
         updateControllerUi(controller);
       });
     });
@@ -690,54 +662,69 @@
     updateControllerUi(controller);
   }
 
+  async function restartRow(controller) {
+    syncRowTime(controller, 0);
+    await startRowPlayback(controller, 0);
+  }
+
   async function startRowPlayback(controller, time = 0, triggerVideo = null) {
     pauseOtherRows(controller);
-    await playRowForGroup(controller, time, triggerVideo);
+    const nextTime = getResumeTime(controller, time);
+    syncRowTime(controller, nextTime);
+
+    if (triggerVideo) {
+      controller.videos.forEach((video) => {
+        if (video !== triggerVideo) {
+          video.playbackRate = triggerVideo.playbackRate || 1;
+        }
+      });
+    }
+
+    const playAttempts = controller.videos.map((video) => {
+      ensureVideoLoaded(video);
+      try {
+        return video.play();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    });
+
+    await Promise.allSettled(playAttempts);
+    startProgressLoop(controller);
+    updateControllerUi(controller);
   }
 
   function pauseOtherRows(activeController) {
     rowControllers.forEach((controller) => {
-      if (controller === activeController) {
-        return;
-      }
-      if (controller.videos.some((video) => !video.paused)) {
-        pauseRowForGroup(controller);
+      if (controller !== activeController && isRowPlaying(controller)) {
+        pauseRow(controller);
       }
     });
   }
 
-  async function playRowForGroup(controller, time = 0, triggerVideo = null) {
-    const { videos, rowState } = controller;
-    rowState.syncing = true;
-    try {
-      for (const video of videos) {
-        ensureVideoLoaded(video);
-        if (Number.isFinite(time) && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
-          video.currentTime = time;
-        }
-        if (triggerVideo && video !== triggerVideo) {
-          video.playbackRate = triggerVideo.playbackRate;
-        }
-      }
-      await Promise.allSettled(videos.map((video) => video.play()));
-    } finally {
-      rowState.syncing = false;
-      updateControllerUi(controller);
-      startProgressLoop(controller);
-    }
-  }
-
-  function pauseRowForGroup(controller, time = null) {
-    const { videos, rowState } = controller;
-    rowState.syncing = true;
-    videos.forEach((video) => {
-      if (time !== null) {
-        video.currentTime = time;
+  function pauseRow(controller, time = null) {
+    const snapshot = Number.isFinite(time) ? time : getCurrentRowTime(controller);
+    controller.rowState.pendingTime = snapshot;
+    stopProgressLoop(controller);
+    controller.videos.forEach((video) => {
+      if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+        safeSetCurrentTime(video, snapshot);
       }
       video.pause();
     });
-    rowState.syncing = false;
+    updateControllerUi(controller);
+  }
+
+  function finishRowPlayback(controller) {
+    const duration = getRowDuration(controller);
+    controller.rowState.pendingTime = duration;
     stopProgressLoop(controller);
+    controller.videos.forEach((video) => {
+      video.pause();
+      if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+        safeSetCurrentTime(video, duration);
+      }
+    });
     updateControllerUi(controller);
   }
 
@@ -745,8 +732,15 @@
     stopProgressLoop(controller);
 
     const tick = () => {
+      if (controller.rowState.scrubbing) {
+        controller.rowState.rafId = window.requestAnimationFrame(tick);
+        return;
+      }
+
+      syncFollowersToLead(controller);
       updateControllerUi(controller);
-      if (controller.videos.some((video) => !video.paused && !video.ended)) {
+
+      if (isRowPlaying(controller)) {
         controller.rowState.rafId = window.requestAnimationFrame(tick);
       } else {
         controller.rowState.rafId = 0;
@@ -764,47 +758,123 @@
   }
 
   function updateControllerUi(controller) {
-    updateRowProgress(controller.videos, controller.seekInput, controller.timeLabel);
-    updateVideoShellState(controller.videos);
+    updateRowProgress(controller);
+    updateVideoShellState(controller);
     updateRowButtons(controller);
   }
 
   function updateRowButtons(controller) {
-    const isPlaying = controller.videos.some((video) => !video.paused && !video.ended);
+    const isPlaying = isRowPlaying(controller);
     if (controller.playToggleButton) {
       controller.playToggleButton.textContent = isPlaying ? "暂停本行" : "播放本行";
     }
     if (controller.restartButton) {
-      controller.restartButton.disabled = controller.videos.every(
-        (video) => (video.currentTime || 0) <= 0 && (video.paused || video.ended),
-      );
+      controller.restartButton.disabled = !isPlaying && getCurrentRowTime(controller) <= 0.01;
     }
   }
 
-  function updateVideoShellState(videos) {
-    videos.forEach((video) => {
-      const shell = video.closest(".video-shell");
+  function updateVideoShellState(controller) {
+    const isPlaying = isRowPlaying(controller);
+    controller.shells.forEach((shell) => {
       if (!shell) {
         return;
       }
-      shell.classList.toggle("is-playing", !video.paused && !video.ended);
+      shell.classList.toggle("is-playing", isPlaying);
     });
   }
 
-  function updateRowProgress(videos, seekInput, timeLabel) {
-    const lead = getReferenceVideo(videos);
-    if (!lead) {
+  function updateRowProgress(controller) {
+    const duration = getRowDuration(controller);
+    const currentTime = getCurrentRowTime(controller);
+
+    if (controller.seekInput) {
+      controller.seekInput.value = duration > 0 ? String(Math.round((currentTime / duration) * 1000)) : "0";
+    }
+    if (controller.timeLabel) {
+      controller.timeLabel.textContent = `${formatMediaTime(currentTime)} / ${formatMediaTime(duration)}`;
+    }
+  }
+
+  function syncRowTime(controller, time) {
+    controller.rowState.pendingTime = Number.isFinite(time) ? time : 0;
+    controller.videos.forEach((video) => {
+      ensureVideoLoaded(video);
+      applyPendingTime(controller, video);
+    });
+  }
+
+  function applyPendingTime(controller, video) {
+    if (!(video instanceof HTMLVideoElement)) {
       return;
     }
-    const duration = Number.isFinite(lead.duration) ? lead.duration : 0;
-    const currentTime = Number.isFinite(lead.currentTime) ? lead.currentTime : 0;
+    if (!Number.isFinite(controller.rowState.pendingTime)) {
+      return;
+    }
+    if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+      return;
+    }
+    safeSetCurrentTime(video, controller.rowState.pendingTime);
+  }
 
-    if (seekInput) {
-      seekInput.value = duration > 0 ? String(Math.round((currentTime / duration) * 1000)) : "0";
+  function safeSetCurrentTime(video, time) {
+    try {
+      video.currentTime = Math.max(0, time || 0);
+    } catch (error) {
+      // Ignore transient media-state errors while metadata is still settling.
     }
-    if (timeLabel) {
-      timeLabel.textContent = `${formatMediaTime(currentTime)} / ${formatMediaTime(duration)}`;
+  }
+
+  function syncFollowersToLead(controller) {
+    const lead = getLeadVideo(controller);
+    if (!lead || lead.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return;
     }
+    controller.rowState.pendingTime = lead.currentTime || 0;
+    controller.videos.forEach((video) => {
+      if (video === lead || video.readyState < HTMLMediaElement.HAVE_METADATA) {
+        return;
+      }
+      if (Math.abs((video.currentTime || 0) - lead.currentTime) > 0.12) {
+        safeSetCurrentTime(video, lead.currentTime);
+      }
+    });
+  }
+
+  function getLeadVideo(controller) {
+    return (
+      controller.videos.find((video) => !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) ||
+      controller.videos.find((video) => video.readyState >= HTMLMediaElement.HAVE_METADATA) ||
+      controller.videos[0]
+    );
+  }
+
+  function getRowDuration(controller) {
+    const lead = getLeadVideo(controller);
+    return Number.isFinite(lead?.duration) ? lead.duration : 0;
+  }
+
+  function getCurrentRowTime(controller) {
+    const lead = getLeadVideo(controller);
+    if (lead && Number.isFinite(lead.currentTime)) {
+      return lead.currentTime;
+    }
+    return controller.rowState.pendingTime || 0;
+  }
+
+  function isRowPlaying(controller) {
+    return controller.videos.some((video) => !video.paused && !video.ended);
+  }
+
+  function getResumeTime(controller, preferredTime = null) {
+    const duration = getRowDuration(controller);
+    const currentTime =
+      Number.isFinite(preferredTime) && preferredTime !== null ? preferredTime : getCurrentRowTime(controller);
+
+    if (duration > 0 && currentTime >= Math.max(duration - 0.05, 0)) {
+      return 0;
+    }
+
+    return currentTime || 0;
   }
 
   function getMethodIdFromPosition(methodByPosition, position) {
