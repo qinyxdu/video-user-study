@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video User Study</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">External User Study</p>
+          <h1>视频对比调研问卷</h1>
+          <p class="hero-text">
+            每一行展示 3 个由相同 prompt 生成的视频。请在每个维度中选择你认为表现最好的
+            左 / 中 / 右 视频。点击任意一个视频后，同一行的另外两个视频会同步播放、暂停与跳转。
+          </p>
+        </div>
+        <div class="meta-panel">
+          <label class="field">
+            <span>参与者编号</span>
+            <input id="participant-id" type="text" placeholder="例如 P01" />
+          </label>
+          <label class="field">
+            <span>备注（可选）</span>
+            <textarea id="participant-notes" rows="3" placeholder="记录额外观察"></textarea>
+          </label>
+          <div class="progress-panel">
+            <div class="progress-line">
+              <span>完成进度</span>
+              <strong id="progress-text">0 / 0</strong>
+            </div>
+            <div class="progress-bar">
+              <div id="progress-fill"></div>
+            </div>
+            <p id="progress-hint">正在加载问卷…</p>
+            <p id="submit-status" class="submit-status">当前为本地填写模式。</p>
+          </div>
+          <div class="action-row">
+            <button id="submit-button" type="button">提交结果</button>
+            <button id="save-button" type="button">保存进度</button>
+            <button id="export-csv-button" type="button">导出 CSV</button>
+            <button id="export-json-button" type="button">导出 JSON</button>
+            <button id="reset-button" class="ghost" type="button">重置</button>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <section class="legend-card">
+          <div>
+            <h2>填写说明</h2>
+            <p>每个维度只能选择一个位置，位置与视频左右顺序一一对应。</p>
+          </div>
+          <div class="legend-grid">
+            <span>Visual Quality</span>
+            <span>Motion Quality</span>
+            <span>Temporal Consistency</span>
+          </div>
+        </section>
+
+        <section id="debug-banner" class="legend-card debug-card" hidden>
+          <div>
+            <h2>Debug Mode</h2>
+            <p>当前显示真实方法名，仅用于你自己检查左右位置映射。外部被试不要使用这个模式。</p>
+          </div>
+        </section>
+
+        <div id="study-root" class="study-root"></div>
+      </main>
+    </div>
+
+    <script src="./config.js"></script>
+    <script src="./study-data.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
